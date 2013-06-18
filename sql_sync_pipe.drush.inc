@@ -29,6 +29,13 @@ function sql_sync_pipe_drush_command() {
       'enable' => 'Enable the specified modules in the target database after the sync operation has completed.',
       'disable' => 'Disable the specified modules in the target database after the sync operation has completed.',
       'permission' => 'Add or remove permissions from a role in the target database after the sync operation has completed. The value of this option must be an array, so it may only be specified in a site alias record or drush configuration file.  See `drush topic docs-example-sync-extension`.',
+      'no-drop' => 'By default the destination\'s tables will be dropped before the source database is imported. Optional.',
+      'skip-tables-key' => 'A key in the $skip_tables array. @see example.drushrc.php. Optional.',
+      'skip-tables-list' => 'A comma-separated list of tables to exclude completely. Optional.',
+      'structure-tables-key' => 'A key in the $structure_tables array. @see example.drushrc.php. Optional.',
+      'structure-tables-list' => 'A comma-separated list of tables to include for structure, but not data. Optional.',
+      'tables-key' => 'A key in the $tables array. Optional.',
+      'tables-list' => 'A comma-separated list of tables to transfer. Optional.',
     ),
     'sub-options' => array(
       'sanitize' => array(
@@ -51,52 +58,148 @@ function sql_sync_pipe_drush_command() {
   return $items;
 }
 
+function drush_sql_sync_pipe_check_self_update() {
+  $cid = 'sql_sync_pipe_update';
+  // Only check once every 24 hours.
+  if (($cache = drush_cache_get($cid)) && isset($cache->created)) {
+    // Initially set threshold to one day.
+    $threshold = 86400; // 1 day.
+    // If no update was found last time, set threshold to 1 week.
+    if (empty($cache->data)) {
+      $threshold = $threshold * 7; // 1 week.
+    }
+    if ((time() - (int)$cache->created) < $threshold) {
+      drush_log(dt("The last update check for sql-sync-pipe was !time. Insufficient time has elapsed to initiate another update check.", array(
+        '!time' => date('Y-M-d H:m:s', (int)$cache->created),
+      )), 'notice');
+      return FALSE;
+    }
+  }
+  $command_dir = dirname(__FILE__);
+  $command_parent_dir = dirname($command_dir);
+  // Don't check unless we have a datestamp in drush.info
+  $current_info_file = $command_dir . '/drush_sql_sync_pipe.info';
+  $current_info = parse_ini_file($current_info_file);
+  if (($current_info === FALSE) || (!array_key_exists('datestamp', $current_info))) {
+    drush_log(dt('Cannot determine the release date for the current installation of the drush_sql_sync_pipe command.'), 'notice');
+    return FALSE;
+  }
+  $is_dev = FALSE;
+  // Get release info for drush.
+  drush_include_engine('release_info', 'updatexml');
+  $request = pm_parse_project_version(array('drush_sql_sync_pipe'));
+  $info = release_info_get_releases($request);
+  // Check for newer releases based on the datestamp.
+  // We add 60 seconds to the .info datestamp because of a drupal.org WTF. See http://drupal.org/node/1019356.
+  $version_date = $current_info['datestamp'] + 60;
+  $newer_version = FALSE;
+  foreach ($info['drush_sql_sync_pipe']['releases'] as $version => $release_info) {
+    // We deliberately skip any dev releases unless the current release is a dev release.
+    if ((!array_key_exists('version_extra', $release_info) || ($release_info['version_extra'] != 'dev'))) {
+      if ($release_info['date'] > $version_date) {
+        $newer_version = $release_info['version'];
+        $version_date = $release_info['date'];
+        $is_dev = isset($release_info['version_extra']) && $release_info['version_extra'] == 'dev';
+        if ($is_dev) {
+          $newer_version .= " (" . date('Y-M-d', $version_date) . ")";
+        }
+      }
+    }
+  }
+  if ($newer_version) {
+    drush_print(dt("\nA newer version of !title is available: !version. The current version installed is !currentversion.\n", array(
+      '!title' => $info['drush_sql_sync_pipe']['title'],
+      '!version' => $newer_version . " (" . date('Y-M-d', $version_date) . ")",
+      '!currentversion' => $current_info['version'] . " (" . date('Y-M-d', $current_info['datestamp']) . ")",
+    )));
+    if (drush_confirm(dt('Would you like to download the new version of !title?', array(
+      '!title' => $info['drush_sql_sync_pipe']['title'],
+    )))) {
+      // Download the latest version.
+      drush_invoke_process($destination, 'pm-download', array('drush_sql_sync_pipe'), array('destination' => $command_parent_dir), array('interactive' => TRUE));
+      // Clear Drush's cache.
+      drush_cache_clear_drush();
+      // Get the current command's arguments.
+      $args = drush_get_arguments();
+      // Remove the first argument, which is just the current command name.
+      array_shift($args);
+      // Re-dispatch this command with the arguments so it uses the newly
+      // downloaded code.
+      drush_do_command_redispatch('sql-sync-pipe', $args);
+      // Flag this dispatch as updated, so it exits quietly.
+      drush_set_context('DRUSH_SQL_SYNC_PIPE_UPDATE', TRUE);
+    }
+  }
+  else {
+    drush_log(dt("!title self-update check: version !version is up-to-date.", array(
+      '!title' => $info['drush_sql_sync_pipe']['title'],
+      '!version' => $current_info['version']
+    )), 'notice');
+  }
+  drush_cache_set($cid, $newer_version);
+  return NULL;
+}
+
 function drush_sql_sync_pipe_init($source = NULL, $destination = NULL) {
+  // Automatically check for updates.
+  drush_sql_sync_pipe_check_self_update();
+  // Ignore hook if command was updated or the simulate option was provided.
+  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATE', FALSE) || drush_get_context('DRUSH_SIMULATE', FALSE)) {
+    return FALSE;
+  }
   drush_command_include('sql-sync');
   drush_include(DRUSH_BASE_PATH . '/commands/sql', 'sql.drush.inc');
   return drush_sql_sync_init($source, $destination);
 }
 
 function drush_sql_sync_pipe_validate($source = NULL, $destination = NULL) {
-  $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
-  if (empty($source_settings)) {
+  // Ignore hook if command was updated.
+  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATE', FALSE)) {
+    return FALSE;
+  }
+  // Ignore hook if the simulate option was provided.
+  if (drush_get_context('DRUSH_SIMULATE', FALSE)) {
+    return drush_set_error('DRUSH_SIMULATE_NOT_SUPPORTED', dt('Simulation for the sql-sync-pipe command is not yet supported.'));
+  }
+  $source_alias = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
+  if (empty($source_alias)) {
     return drush_set_error('DRUSH_ALIAS_NOT_FOUND', dt('Error: no alias record could be found for !source', array('!source' => $source)));
   }
-  $source_db_url = drush_sitealias_get_db_spec($source_settings, FALSE, 'source-');
-  if (empty($source_db_url)) {
+  $source_database = drush_sitealias_get_db_spec($source_alias, FALSE, 'source-');
+  if (empty($source_database)) {
     return drush_set_error('DRUSH_DATABASE_NOT_FOUND', dt('Error: no database record could be found for !source', array('!source' => $source)));
   }
-  $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
-  if (empty($destination_settings)) {
+  $destination_alias = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
+  if (empty($destination_alias)) {
     return drush_set_error('DRUSH_ALIAS_NOT_FOUND', dt('Error: no alias record could be found for !destination', array('!destination' => $destination)));
   }
-  $target_db_url = drush_sitealias_get_db_spec($destination_settings, FALSE, 'target-');
-  if (empty($target_db_url)) {
+  $destination_database = drush_sitealias_get_db_spec($destination_alias, FALSE, 'target-');
+  if (empty($destination_database)) {
     return drush_set_error('DRUSH_DATABASE_NOT_FOUND', dt('Error: no database record could be found for !destination', array('!destination' => $destination)));
   }
 }
 
 function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
-  $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
-  $source_db_url = drush_sitealias_get_db_spec($source_settings, FALSE, 'source-');
+  $source_alias = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
+  $source_database = drush_sitealias_get_db_spec($source_alias, FALSE, 'source-');
 
-  $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
-  $target_db_url = drush_sitealias_get_db_spec($destination_settings, FALSE, 'target-');
+  $destination_alias = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
+  $destination_database = drush_sitealias_get_db_spec($destination_alias, FALSE, 'target-');
 
   $target_dump = FALSE;
   if (drush_get_option('dump', FALSE)) {
     if (drush_get_option('temp', FALSE)) {
-      if ($destination_settings['path-aliases']['%dump']) {
-        unset($destination_settings['path-aliases']['%dump']);
+      if ($destination_alias['path-aliases']['%dump']) {
+        unset($destination_alias['path-aliases']['%dump']);
       }
     }
-    $target_dump = drush_sql_dump_file($destination_settings);
+    $target_dump = drush_sql_dump_file($destination_alias);
   }
 
   $progress = FALSE;
   if (drush_get_option('progress', FALSE)) {
     // Destination is local.
-    if (empty($target_db_url['remote-host'])) {
+    if (empty($destination_database['remote-host'])) {
       drush_shell_exec('which pv');
       $output = drush_shell_exec_output();
       if (!empty($output) && isset($output[0]) && file_exists($output[0])) {
@@ -110,23 +213,23 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   // However, if the source is remote and the database server is also hosted
   // there, then the dump should be piped through an SSH command as it may not
   // allow remote database connections.
-  $source_db_host = FALSE;
-  if (!empty($source_db_url['remote-host'])) {
-    $source_db_host = $source_db_url['remote-host'];
-    if (drush_sitealias_get_option($source_settings, 'db-allows-remote', FALSE) && $source_db_url['remote-host'] !== $source_db_url['host'] && $source_db_url['host'] !== 'localhost' && $source_db_url['host'] !== '127.0.0.1' && !isset($source_db_url['socket'])) {
-      $source_db_host = $source_db_url['host'];
+  $source_database['db-host'] = FALSE;
+  if (!empty($source_database['remote-host'])) {
+    $source_database['db-host'] = $source_database['remote-host'];
+    if (drush_sitealias_get_option($source_alias, 'db-allows-remote', FALSE) && $source_database['remote-host'] !== $source_database['host'] && $source_database['host'] !== 'localhost' && $source_database['host'] !== '127.0.0.1' && !isset($source_database['socket'])) {
+      $source_database['db-host'] = $source_database['host'];
     }
   }
-  $target_db_host = FALSE;
-  if (!empty($target_db_url['remote-host'])) {
-    $target_db_host = $target_db_url['remote-host'];
-    if (drush_sitealias_get_option($destination_settings, 'db-allows-remote', FALSE) && $target_db_url['remote-host'] !== $target_db_url['host'] && $target_db_url['host'] !== 'localhost' && $target_db_url['host'] !== '127.0.0.1' && !isset($target_db_url['socket'])) {
-      $target_db_host = $target_db_url['host'];
+  $destination_database['db-host'] = FALSE;
+  if (!empty($destination_database['remote-host'])) {
+    $destination_database['db-host'] = $destination_database['remote-host'];
+    if (drush_sitealias_get_option($destination_alias, 'db-allows-remote', FALSE) && $destination_database['remote-host'] !== $destination_database['host'] && $destination_database['host'] !== 'localhost' && $destination_database['host'] !== '127.0.0.1' && !isset($destination_database['socket'])) {
+      $destination_database['db-host'] = $destination_database['host'];
     }
   }
   // Build textual representations of the database host.
-  $txt_source = ($source_db_host ? $source_db_host . '/' : '') . $source_db_url['database'];
-  $txt_destination = ($target_db_host ? $target_db_host . '/' : '') . $target_db_url['database'];
+  $txt_source = ($source_database['db-host'] ? $source_database['db-host'] . '/' : '') . $source_database['database'];
+  $txt_destination = ($destination_database['db-host'] ? $destination_database['db-host'] . '/' : '') . $destination_database['database'];
 
   // Create the drop/create MySQL command.Re-create the local DB table.
   drush_print(dt('You will destroy data in !target and replace with data from !source.', array(
@@ -153,32 +256,26 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   if (!drush_confirm(dt('Do you really want to continue?'))) {
     return drush_user_abort();
   }
+  
+  // Drop tables on destination as long as the 'no-drop' option isn't specified.
+  if (!drush_get_option('no-drop', FALSE)) {
+    drush_sql_empty_db($destination_database);
+  }
 
   $table_selection = drush_sql_get_table_selection();
   // Add cache tables to the $table_selection['structure'] array so they get
   // created, but without any data.
   if (!drush_get_option('include-cache-tables', FALSE)) {
-    $cache_tables = array();
-    $cmd = _sql_sync_pipe_query('show tables;', $source_db_url);
-    if (!empty($source_db_url['remote-host']) && $source_db_host === $source_db_url['remote-host']) {
-      $cmd = drush_shell_proc_build($source_settings, $cmd);
-    }
-    drush_shell_exec($cmd);
-    $output = drush_shell_exec_output();
-    if (is_array($output) && !empty($output)) {
-      foreach ($output as $table) {
-        if (strpos($table, 'cache') !== FALSE) {
-          $cache_tables[] = $table;
-        }
-      }
-    }
+    $cache_tables = _sql_sync_pipe_get_tables($source_alias, $source_database, '*cache*');
     $table_selection['structure'] = array_merge($cache_tables, $table_selection['structure']);
   }
+  
   // Build the dump command.
-  $dump_cmd = drush_sql_sync_pipe_build_dump_command($table_selection, $source_db_url);
+  $dump_cmd = _sql_sync_pipe_build_dump_command($table_selection, $source_database);
+  
   // Build the import command.
-  $import_command = _drush_sql_connect($target_db_url);
-  switch (_drush_sql_get_scheme($target_db_url)) {
+  $import_command = _drush_sql_connect($destination_database);
+  switch (_drush_sql_get_scheme($destination_database)) {
     case 'mysql':
       $import_command .= ' --compress --silent';
       break;
@@ -189,9 +286,9 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
 
   $commands = array();
   $remote_gzip = FALSE;
-  if (!empty($source_db_url['remote-host']) && $source_db_host === $source_db_url['remote-host']) {
+  if (!empty($source_database['remote-host']) && $source_database['db-host'] === $source_database['remote-host']) {
     $remote_gzip = TRUE;
-    $commands[] = drush_shell_proc_build($source_settings, $dump_cmd . ' | gzip -c9');
+    $commands[] = drush_shell_proc_build($source_alias, $dump_cmd . ' | gzip -c9');
   }
   else {
     $commands[] = $dump_cmd;
@@ -199,8 +296,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   // Dump to a file, gunzip and then import.
   if (drush_get_option('dump', FALSE) && $target_dump) {
     // Dump
-    drush_print();
-    drush_print(dt('Saving dump from !source...', array(
+    drush_print(dt("\nSaving dump from !source...", array(
       '!source' => $txt_source,
     )));
     if ($progress) {
@@ -208,14 +304,13 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     }
     $commands[] = 'tee > ' . $target_dump . '.gz';
     $cmd = implode(' | ', $commands);
-    if (!empty($target_db_url['remote-host']) && $target_db_host === $target_db_url['remote-host']) {
-      $cmd = drush_shell_proc_build($destination_settings, $cmd);
+    if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
+      $cmd = drush_shell_proc_build($destination_alias, $cmd);
     }
     drush_shell_exec($cmd);
 
     // Importing
-    drush_print();
-    drush_print(dt('Importing dump into !target...', array(
+    drush_print(dt("\nImporting dump into !target...", array(
       '!target' => $txt_destination,
     )));
     $commands = array();
@@ -228,8 +323,8 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it a SSH.
-    if (!empty($target_db_url['remote-host']) && $target_db_host === $target_db_url['remote-host']) {
-      $cmd = drush_shell_proc_build($destination_settings, $cmd);
+    if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
+      $cmd = drush_shell_proc_build($destination_alias, $cmd);
     }
     drush_shell_exec($cmd);
 
@@ -248,8 +343,8 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     if (!empty($commands)) {
       $cmd = implode('; ', $commands);
       // Destination is remote, wrap it a SSH.
-      if (!empty($target_db_url['remote-host'])) {
-        $cmd = drush_shell_proc_build($destination_settings, $cmd);
+      if (!empty($destination_database['remote-host'])) {
+        $cmd = drush_shell_proc_build($destination_alias, $cmd);
       }
       drush_shell_exec($cmd);
     }
@@ -265,8 +360,8 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it in a SSH proc.
-    if (!empty($target_db_url['remote-host'])) {
-      $cmd = drush_shell_proc_build($destination_settings, $cmd);
+    if (!empty($destination_database['remote-host'])) {
+      $cmd = drush_shell_proc_build($destination_alias, $cmd);
     }
     drush_shell_exec($cmd);
   }
@@ -279,7 +374,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   // This presumes an important precondition, that the code
   // files were sync'ed before the database was sync'ed.
   if (drush_get_option('deferred-sanitization', FALSE) && (drush_has_boostrapped(DRUSH_BOOTSTRAP_DRUPAL_SITE) == FALSE)) {
-    $bootstrapped = drush_bootstrap_max_to_sitealias($destination_settings);
+    $bootstrapped = drush_bootstrap_max_to_sitealias($destination_alias);
     if ($bootstrapped) {
       drush_command_invoke_all('drush_sql_sync_sanitize', $destination);
       $messages = _drush_sql_get_post_sync_messages();
@@ -308,6 +403,33 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
       }
     }
   }
+}
+
+function _sql_sync_pipe_get_tables($alias, $database, $pattern = NULL) {
+  $tables = array();
+  $cmd = _sql_sync_pipe_query('show tables;', $database);
+  if ($database['db-host'] === $database['remote-host']) {
+    $cmd = drush_shell_proc_build($alias, $cmd);
+  }
+  drush_shell_exec($cmd);
+  $output = drush_shell_exec_output();
+  if (is_array($output) && !empty($output)) {
+    // Remove the first item from the array, it's the table header.
+    array_shift($output);
+    // Match a specific pattern against table names.
+    if (!empty($pattern)) {
+      foreach ($output as $table) {
+        if (preg_match($pattern, $table)) {
+          $tables[] = $table;
+        }
+      }
+    }
+    // Include all tables.
+    else {
+      $tables = $output;
+    }
+  }
+  return $tables;
 }
 
 function drush_sql_sync_pipe_post_sql_sync_pipe($source = NULL, $destination = NULL) {
@@ -347,7 +469,7 @@ function drush_sql_sync_pipe_post_sql_sync_pipe($source = NULL, $destination = N
   }
 }
 
-function drush_sql_sync_pipe_build_dump_command($table_selection, $db_spec = NULL) {
+function _sql_sync_pipe_build_dump_command($table_selection, $db_spec = NULL) {
   $skip_tables = $table_selection['skip'];
   $structure_tables = $table_selection['structure'];
   $tables = $table_selection['tables'];
