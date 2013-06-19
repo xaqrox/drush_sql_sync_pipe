@@ -196,17 +196,6 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     $target_dump = drush_sql_dump_file($destination_alias);
   }
 
-  $progress = FALSE;
-  if (drush_get_option('progress', FALSE)) {
-    // Destination is local.
-    if (empty($destination_database['remote-host'])) {
-      drush_shell_exec('which pv');
-      $output = drush_shell_exec_output();
-      if (!empty($output) && isset($output[0]) && file_exists($output[0])) {
-        $progress = $output[0] . ' -cWptab ';
-      }
-    }
-  }
   // If the source is remote, but the database server is hosted elsewhere then
   // that database server allows remote connections. It would be redundant
   // to connect to the source server just to dump the database.
@@ -299,9 +288,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     drush_print(dt("\nSaving dump from !source...", array(
       '!source' => $txt_source,
     )));
-    if ($progress) {
-      $commands[] = $progress;
-    }
+    _sql_sync_pipe_pv($commands);
     $commands[] = 'tee > ' . $target_dump . '.gz';
     $cmd = implode(' | ', $commands);
     if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
@@ -317,9 +304,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     if ($remote_gzip) {
       $commands[] = 'gunzip -c ' . $target_dump . '.gz';
     }
-    if ($progress) {
-      $commands[] = $progress;
-    }
+    _sql_sync_pipe_pv($commands, ' -s $(gzip -ql ' . $target_dump . '.gz | awk \'{ print $2; }\') ');
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it a SSH.
@@ -354,9 +339,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     if ($remote_gzip) {
       $commands[] = 'gunzip -c';
     }
-    if ($progress) {
-      $commands[] = $progress;
-    }
+    _sql_sync_pipe_pv($commands);
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it in a SSH proc.
@@ -402,6 +385,38 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
         }
       }
     }
+  }
+}
+
+function _sql_sync_pipe_pv(array &$commands, $flags = '') {
+  static $pv;
+  // Initialize PipeViewer command, if installed.
+  if (!isset($pv)) {
+    $pv = FALSE;
+    if (drush_get_option('progress', FALSE)) {
+      // Destination is local.
+      if (empty($destination_database['remote-host'])) {
+        drush_shell_exec('which pv');
+        $pv = drush_shell_exec_output();
+        $pv = reset($pv);
+        if ($pv && is_executable($pv)) {
+          $pv .= ' -c';
+          // Determine PipeViewr version for specific options.
+          drush_shell_exec('pv --version | head -n1 | sed \'s/^\(pv \)\([0-9].[0-9].[0-9]\)\(.*\)$/\2/\'');
+          $version = drush_shell_exec_output();
+          $version = reset($version);
+          if (version_compare($version, '1.4.0', '>=')) {
+            $pv .= ' -E';
+          }
+        }
+        else {
+          $pv = FALSE;
+        }
+      }
+    }
+  }
+  if ($pv) {
+    $commands[] = $pv . $flags;
   }
 }
 
