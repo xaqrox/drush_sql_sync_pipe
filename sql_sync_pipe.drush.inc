@@ -1,5 +1,7 @@
 <?php
 
+include_once dirname(__FILE__) . '/update.inc';
+
 /**
  * Implements hook_drush_command().
  */
@@ -58,93 +60,11 @@ function sql_sync_pipe_drush_command() {
   return $items;
 }
 
-function drush_sql_sync_pipe_check_self_update() {
-  $cid = 'sql_sync_pipe_update';
-  // Only check once every 24 hours.
-  if (($cache = drush_cache_get($cid)) && isset($cache->created)) {
-    // Initially set threshold to one day.
-    $threshold = 86400; // 1 day.
-    // If no update was found last time, set threshold to 1 week.
-    if (empty($cache->data)) {
-      $threshold = $threshold * 7; // 1 week.
-    }
-    if ((time() - (int)$cache->created) < $threshold) {
-      drush_log(dt("The last update check for sql-sync-pipe was !time. Insufficient time has elapsed to initiate another update check.", array(
-        '!time' => date('Y-M-d H:m:s', (int)$cache->created),
-      )), 'notice');
-      return FALSE;
-    }
-  }
-  $command_dir = dirname(__FILE__);
-  $command_parent_dir = dirname($command_dir);
-  // Don't check unless we have a datestamp in drush.info
-  $current_info_file = $command_dir . '/drush_sql_sync_pipe.info';
-  $current_info = parse_ini_file($current_info_file);
-  if (($current_info === FALSE) || (!array_key_exists('datestamp', $current_info))) {
-    drush_log(dt('Cannot determine the release date for the current installation of the drush_sql_sync_pipe command.'), 'notice');
-    return FALSE;
-  }
-  $is_dev = FALSE;
-  // Get release info for drush.
-  drush_include_engine('release_info', 'updatexml');
-  $request = pm_parse_project_version(array('drush_sql_sync_pipe'));
-  $info = release_info_get_releases($request);
-  // Check for newer releases based on the datestamp.
-  // We add 60 seconds to the .info datestamp because of a drupal.org WTF. See http://drupal.org/node/1019356.
-  $version_date = $current_info['datestamp'] + 60;
-  $newer_version = FALSE;
-  foreach ($info['drush_sql_sync_pipe']['releases'] as $version => $release_info) {
-    // We deliberately skip any dev releases unless the current release is a dev release.
-    if ((!array_key_exists('version_extra', $release_info) || ($release_info['version_extra'] != 'dev'))) {
-      if ($release_info['date'] > $version_date) {
-        $newer_version = $release_info['version'];
-        $version_date = $release_info['date'];
-        $is_dev = isset($release_info['version_extra']) && $release_info['version_extra'] == 'dev';
-        if ($is_dev) {
-          $newer_version .= " (" . date('Y-M-d', $version_date) . ")";
-        }
-      }
-    }
-  }
-  if ($newer_version) {
-    drush_print(dt("\nA newer version of !title is available: !version. The current version installed is !currentversion.\n", array(
-      '!title' => $info['drush_sql_sync_pipe']['title'],
-      '!version' => $newer_version . " (" . date('Y-M-d', $version_date) . ")",
-      '!currentversion' => $current_info['version'] . " (" . date('Y-M-d', $current_info['datestamp']) . ")",
-    )));
-    if (drush_confirm(dt('Would you like to download the new version of !title?', array(
-      '!title' => $info['drush_sql_sync_pipe']['title'],
-    )))) {
-      // Download the latest version.
-      drush_invoke_process($destination, 'pm-download', array('drush_sql_sync_pipe'), array('destination' => $command_parent_dir), array('interactive' => TRUE));
-      // Clear Drush's cache.
-      drush_cache_clear_drush();
-      // Get the current command's arguments.
-      $args = drush_get_arguments();
-      // Remove the first argument, which is just the current command name.
-      array_shift($args);
-      // Re-dispatch this command with the arguments so it uses the newly
-      // downloaded code.
-      drush_do_command_redispatch('sql-sync-pipe', $args);
-      // Flag this dispatch as updated, so it exits quietly.
-      drush_set_context('DRUSH_SQL_SYNC_PIPE_UPDATE', TRUE);
-    }
-  }
-  else {
-    drush_log(dt("!title self-update check: version !version is up-to-date.", array(
-      '!title' => $info['drush_sql_sync_pipe']['title'],
-      '!version' => $current_info['version']
-    )), 'notice');
-  }
-  drush_cache_set($cid, $newer_version);
-  return NULL;
-}
-
 function drush_sql_sync_pipe_init($source = NULL, $destination = NULL) {
   // Automatically check for updates.
-  drush_sql_sync_pipe_check_self_update();
+  _sql_sync_pipe_update_check();
   // Ignore hook if command was updated or the simulate option was provided.
-  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATE', FALSE) || drush_get_context('DRUSH_SIMULATE', FALSE)) {
+  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATED', FALSE) || drush_get_context('DRUSH_SIMULATE', FALSE)) {
     return FALSE;
   }
   drush_command_include('sql-sync');
@@ -154,7 +74,7 @@ function drush_sql_sync_pipe_init($source = NULL, $destination = NULL) {
 
 function drush_sql_sync_pipe_validate($source = NULL, $destination = NULL) {
   // Ignore hook if command was updated.
-  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATE', FALSE)) {
+  if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATED', FALSE)) {
     return FALSE;
   }
   // Ignore hook if the simulate option was provided.
