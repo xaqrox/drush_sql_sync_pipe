@@ -31,6 +31,7 @@ function sql_sync_pipe_drush_command() {
       'enable' => 'Enable the specified modules in the target database after the sync operation has completed.',
       'disable' => 'Disable the specified modules in the target database after the sync operation has completed.',
       'permission' => 'Add or remove permissions from a role in the target database after the sync operation has completed. The value of this option must be an array, so it may only be specified in a site alias record or drush configuration file.  See `drush topic docs-example-sync-extension`.',
+      'no-cache' => 'Pulls a fresh copy of the source database, otherwise if the dump file is less that 24 hours old, it will be imported. Only available when --dump option is used.',
       'no-drop' => 'By default the destination\'s tables will be dropped before the source database is imported. Optional.',
       'skip-tables-key' => 'A key in the $skip_tables array. @see example.drushrc.php. Optional.',
       'skip-tables-list' => 'A comma-separated list of tables to exclude completely. Optional.',
@@ -204,17 +205,25 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   }
   // Dump to a file, gunzip and then import.
   if (drush_get_option('dump', FALSE) && $target_dump) {
-    // Dump
-    drush_print(dt("\nSaving dump from !source...", array(
-      '!source' => $txt_source,
-    )));
-    _sql_sync_pipe_pv($commands);
-    $commands[] = 'tee > ' . $target_dump . '.gz';
-    $cmd = implode(' | ', $commands);
-    if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
-      $cmd = drush_shell_proc_build($destination_alias, $cmd);
+    if (!file_exists($target_dump) || drush_get_option('no-cache', FALSE) || (time() - filemtime($target_dump)) > 86400) {
+      // Dump
+      drush_print(dt("\nSaving dump from !source...", array(
+        '!source' => $txt_source,
+      )));
+      _sql_sync_pipe_pv($commands);
+      $commands[] = 'tee > ' . $target_dump . ($remote_gzip ? '.gz' : '');
+      $cmd = implode(' | ', $commands);
+      if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
+        $cmd = drush_shell_proc_build($destination_alias, $cmd);
+      }
+      drush_shell_exec($cmd);
     }
-    drush_shell_exec($cmd);
+    else {
+      drush_print(dt("\nAn existing dump of !source already exists at !target_dump. It is less than 24 hours old and will be used for import instead. Use --no-cache if you wish to pull a fresh copy.", array(
+        '!source' => $txt_source,
+        '!target_dump' => $target_dump,
+      )));
+    }
 
     // Importing
     drush_print(dt("\nImporting dump into !target...", array(
