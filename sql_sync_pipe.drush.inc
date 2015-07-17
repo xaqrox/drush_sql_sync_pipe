@@ -1,7 +1,5 @@
 <?php
 
-include_once dirname(__FILE__) . '/update.inc';
-
 /**
  * Implements hook_drush_command().
  */
@@ -53,7 +51,7 @@ function sql_sync_pipe_drush_command() {
     'description' => 'README.txt for the sql-sync-pipe command.',
     'hidden' => TRUE,
     'topic' => TRUE,
-    'bootstrap' => DRUSH_BOOTSTRAP_DRUSH,
+    'bootstrap' => DRUSH_BOOTSTRAP_NONE,
     'callback' => 'drush_print_file',
     'callback arguments' => array(dirname(__FILE__) . '/README.txt'),
     'aliases' => array('docs-ssp', 'docs-pipe'),
@@ -65,16 +63,50 @@ function sql_sync_pipe_drush_command() {
  * @todo document this
  */
 function drush_sql_sync_pipe_init($source = NULL, $destination = NULL) {
+  // Validate installed Drush version.
+  $supported_versions = array(7, 8);
+  if (!defined('DRUSH_MAJOR_VERSION') || !in_array(DRUSH_MAJOR_VERSION, $supported_versions)) {
+    $info = parse_ini_file(dirname(__FILE__) . '/drush_sql_sync_pipe.info');
+    return drush_set_error('DRUSH_VERSION_NOT_SUPPORTED', dt("\nDrush SQL Sync Pipe (!PIPE_VERSION) only supports the following major Drush version(s): !SUPPORTED_VERSIONS\nThe currently installed Drush version is: !DRUSH_VERSION\nFor more details, please visit: !url\n", array(
+      '!PIPE_VERSION' => $info && !empty($info['version']) ? $info['version'] : 'unknown',
+      '!SUPPORTED_VERSIONS' => implode(', ', $supported_versions),
+      '!DRUSH_VERSION' => DRUSH_VERSION,
+      '!url' => 'https://www.drupal.org/project/drush_sql_sync_pipe',
+    )));
+  }
+
+  // Normally these engines would be loaded via the command info, however they
+  // are loaded before this hook is invoked. If an engine doesn't exist because
+  // of a different Drush version, all the person gets is an error. By loading
+  // the engines after the above version check, we can give the user a more
+  // meaningful reason as to why this command won't work (i.e. wrong version).
+  $command = drush_get_command();
+  $command['engines'] = array(
+    'package_handler' => array(
+      'default' => 'wget',
+    ),
+    'release_info' => array(
+      'default' => 'updatexml'
+    ),
+    'update_status' => array(
+      'default' => 'drush'
+    ),
+  );
+  drush_load_command_engines($command);
+
   // Automatically check for updates.
+  include_once dirname(__FILE__) . '/update.inc';
   _sql_sync_pipe_update_check();
+
   // Ignore hook if command was updated or the simulate option was provided.
   if (drush_get_context('DRUSH_SQL_SYNC_PIPE_UPDATED', FALSE) || drush_get_context('DRUSH_SIMULATE', FALSE)) {
     return FALSE;
   }
+
   drush_command_include('sql-sync');
   drush_include(DRUSH_BASE_PATH . '/commands/sql', 'sql.drush');
   drush_sql_bootstrap_further();
-  return drush_sql_sync_init($source, $destination);
+  drush_sql_sync_init($source, $destination);
 }
 
 /**
@@ -166,10 +198,10 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     $cache_tables = _sql_sync_pipe_get_tables($source_alias, $source_database, '*cache*');
     $table_selection['structure'] = array_merge($cache_tables, $table_selection['structure']);
   }
-  
+
   // Build the dump command.
   $dump_cmd = _sql_sync_pipe_build_dump_command($table_selection, $source_database);
-  
+
   // Build the import command.
   $import_command = $sql->connect(FALSE);
   switch ($sql->scheme()) {
