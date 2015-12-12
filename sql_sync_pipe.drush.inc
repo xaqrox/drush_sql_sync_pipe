@@ -134,6 +134,24 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   $destination_alias = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
   $destination_database = drush_sitealias_get_db_spec($destination_alias, FALSE, 'target-');
 
+  // Get all options. Originally from drush_sqlsync_sql_sync().
+  // These options are passed along to subcommands like sql-create, sql-dump, sql-query, sql-sanitize, ...
+  $source_options = drush_get_merged_prefixed_options('source-');
+  $target_options = drush_get_merged_prefixed_options('target-');
+  $backend_options = array();
+  // @todo drush_redispatch_get_options() assumes you will execute same command. Not good.
+  $global_options = drush_redispatch_get_options() + array(
+     'strict' => 0,
+  );
+  // We do not want to include root or uri here.  If the user
+  // provided -r or -l, their key has already been remapped to
+  // 'root' or 'uri' by the time we get here.
+  unset($global_options['root']);
+  unset($global_options['uri']);
+  if (drush_get_context('DRUSH_SIMULATE')) {
+    $backend_options['backend-simulate'] = TRUE;
+  }
+
   $target_dump = FALSE;
   if (drush_get_option('dump', FALSE)) {
     if (drush_get_option('temp', FALSE)) {
@@ -297,41 +315,16 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     drush_shell_exec($cmd);
   }
 
-  // After the database is imported into the destination, we
-  // will check and see if we did not collect sanitization
-  // operations at the beginning of the function (i.e. because the source
-  // site was remote), and if the destination site is local,
-  // then we will call the sanitization hooks now.
-  // This presumes an important precondition, that the code
-  // files were sync'ed before the database was sync'ed.
-  if (drush_get_option('deferred-sanitization', FALSE) && (drush_has_boostrapped(DRUSH_BOOTSTRAP_DRUPAL_SITE) == FALSE)) {
-    $bootstrapped = drush_bootstrap_max_to_sitealias($destination_alias);
-    if ($bootstrapped) {
-      drush_command_invoke_all('drush_sql_sync_sanitize', $destination);
-      $messages = _drush_sql_get_post_sync_messages();
-      if ($messages) {
-        drush_print();
-        drush_print($messages);
-      }
-      if (!drush_confirm(dt('Do you really want to sanitize the current database?'))) {
-        return drush_user_abort();
-      }
-      drush_sql_bootstrap_further();
-      drush_include(DRUSH_BASE_PATH . '/commands/sql', 'sync.sql');
-      drush_command_invoke_all('drush_sql_sync_sanitize', 'default');
-      $options = drush_get_context('post-sync-ops');
-      $sanitize_query = '';
-      foreach ($options as $id => $data) {
-        $sanitize_query .= $data['query'] . " ";
-      }
-      if (!empty($sanitize_query)) {
-        if (!drush_get_context('DRUSH_SIMULATE')) {
-          drush_sql_query($sanitize_query);
-        }
-        else {
-          drush_print("Executing: $sanitize_query");
-        }
-      }
+  // Run Sanitize if needed.
+  // Originally from drush_sqlsync_sql_sync().
+  $options = $global_options + $target_options;
+  if (drush_get_option('sanitize')) {
+    // Ideally, we should be using LogLevel::OK here instead of 'ok' if the
+    // class can be loaded.
+    drush_log(dt('Starting to sanitize target database on Destination.'), 'ok');
+    $return = drush_invoke_process($destination, 'sql-sanitize', array(), $options, $backend_options);
+    if ($return['error_status']) {
+      return drush_set_error('DRUSH_SQL_SANITIZE_FAILED', dt('sql-sanitize failed.'));
     }
   }
 }
