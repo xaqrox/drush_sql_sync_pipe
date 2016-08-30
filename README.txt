@@ -3,20 +3,24 @@ drush sql-sync-pipe (ssp, pipe)
 Drush command for copying and importing source database to target database.
 Transfers via pipes whenever possible.
 
-
 Standard `sql-sync` requires that you save the database dump on the server,
 transfer it via rsync and then import it into your destination's database. This
-normally would probably be fine if you have a small site. But lets say that
-you have a database that's huge, 1GB+ huge. This is a very inefficient method
-of transportation. Not only do I have to wait for the source to dump and
-transfer just the tiny bit that was changed, but I then have to wait again for
-the database to then import on the destination. Also, it dumps all the cache
-tables too, we normally don't need those. If you do, you can easily pass the
-`--include-cache-tables` option. This command also allows alias files to
-specify the option of `db-allows-remote` so it connects directly to the
-database server instead of first trying to log into the source server via SSH.
-Finally something that will work with Pantheon with out having to install
-backend commands in the repo :)
+is sufficient for small sites, but often inefficient for large databases (over
+1GB+). `sql-sync-pipe` does not wait for a dump file to be created, saved,
+transfered and imported but instead streams the dump directly from the source to
+the destination database in addition to excluding cache tables by default. If
+you prefer to include cachce files, you can use the `--include-cache-tables`
+option. This command also allows alias files to specify the option of
+`db-allows-remote` so it connects directly to the database server instead of
+first trying to log into the source server via SSH. Finally something that will
+work with Pantheon with out having to install backend commands in the repo :)
+
+## Installation
+Drush 7 (use the 7.x-2.x branch/releases), 8 (necessary for Drupal 8):
+drush dl drush_sql_sync_pipe --destination=$HOME/.drush && drush cc drush
+
+Drush 4, 5, 6 (use the 7.x-1.x branch/releases):
+drush dl drush_sql_sync_pipe-7.x-1.4 --destination=$HOME/.drush && drush cc drush
 
 ## Benchmarks
 Below are examples of syncing the same 1.05Gib database using the two different
