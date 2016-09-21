@@ -236,6 +236,9 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
   if (!empty($source_database['remote-host']) && $source_database['db-host'] === $source_database['remote-host']) {
     $remote_gzip = TRUE;
     $commands[] = drush_shell_proc_build($source_alias, $dump_cmd . ' | gzip -c9');
+    if ($target_dump) {
+      $target_dump .= '.gz';
+    }
   }
   else {
     $commands[] = $dump_cmd;
@@ -248,7 +251,7 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
         '!source' => $txt_source,
       )));
       _sql_sync_pipe_pv($commands);
-      $commands[] = 'tee > ' . $target_dump . ($remote_gzip ? '.gz' : '');
+      $commands[] = 'tee > ' . $target_dump;
       $cmd = implode(' | ', $commands);
       if (!empty($destination_database['remote-host']) && $destination_database['db-host'] === $destination_database['remote-host']) {
         $cmd = drush_shell_proc_build($destination_alias, $cmd);
@@ -268,9 +271,9 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
     )));
     $commands = array();
     if ($remote_gzip) {
-      $commands[] = 'gunzip -c ' . $target_dump . '.gz';
+      $commands[] = 'gunzip -c ' . $target_dump;
     }
-    _sql_sync_pipe_pv($commands, ' -s $(gzip -ql ' . $target_dump . '.gz | awk \'{ print $2; }\') ');
+    _sql_sync_pipe_pv($commands, ' -s $(gzip -ql ' . $target_dump . ' | awk \'{ print $2; }\') ');
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it a SSH.
@@ -281,14 +284,9 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
 
     // Remove files if necessary.
     $commands = array();
-    if (drush_get_option('temp', FALSE) || $remote_gzip) {
+    if (drush_get_option('temp', FALSE)) {
       if (file_exists($target_dump)) {
         $commands[] = 'rm -f ' . $target_dump;
-      }
-    }
-    if (drush_get_option('temp', FALSE)) {
-      if (file_exists($target_dump . '.gz')) {
-        $commands[] = 'rm -f ' . $target_dump . '.gz';
       }
     }
     if (!empty($commands)) {
