@@ -270,10 +270,20 @@ function drush_sql_sync_pipe($source = NULL, $destination = NULL) {
       '!target' => $txt_destination,
     )));
     $commands = array();
+    $flags = ' -s ';
     if ($remote_gzip) {
       $commands[] = 'gunzip -c ' . $target_dump;
+      $flags .= '$(gzip -ql ' . $target_dump . ' | awk \'{ print $2; }\') ';
     }
-    _sql_sync_pipe_pv($commands, ' -s $(gzip -ql ' . $target_dump . ' | awk \'{ print $2; }\') ');
+    else {
+      $commands[] = 'cat ' . $target_dump;
+      $size_cmd = 'du -b ' . $target_dump . ' | awk \'{ print $1 }\'';
+      drush_shell_exec($size_cmd);
+      $size = drush_shell_exec_output();
+      $size = reset($size);
+      $flags .= $size;
+    }
+    _sql_sync_pipe_pv($commands, $flags);
     $commands[] = $import_command;
     $cmd = implode(' | ', $commands);
     // Destination is remote, wrap it a SSH.
